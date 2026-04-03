@@ -10,7 +10,6 @@ void solvePnP(
     Eigen::Matrix3d &R,
     Eigen::Vector3d &T
 ) {
-    // Minimum number of points required by DLT is 6
     size_t n = pts_3.size();
     if (n < 6 || pts_3.size() != pts_2.size()) {
         std::cerr << "Not enough points or mismatch in number of 2D and 3D points." << std::endl;
@@ -44,11 +43,15 @@ void solvePnP(
         A(row2, 6) = -v * X; A(row2, 7) = -v * Y; A(row2, 8) = -v;     
     }
     
-    // 2. Solve Ax = 0 using SVD
+    // 2. Safely Convert K to double and build K_eigen
+    cv::Mat K_double;
+    K.convertTo(K_double, CV_64F); // Protects against CV_32F (float) crash
+    
     Eigen::Matrix3d K_eigen;
-    K_eigen << K.at<double>(0,0), K.at<double>(0,1), K.at<double>(0,2),
-               K.at<double>(1,0), K.at<double>(1,1), K.at<double>(1,2),
-               K.at<double>(2,0), K.at<double>(2,1), K.at<double>(2,2);
+    K_eigen << K_double.at<double>(0,0), K_double.at<double>(0,1), K_double.at<double>(0,2),
+               K_double.at<double>(1,0), K_double.at<double>(1,1), K_double.at<double>(1,2),
+               K_double.at<double>(2,0), K_double.at<double>(2,1), K_double.at<double>(2,2);
+    
     Eigen::Matrix3d K_inv = K_eigen.inverse();
     Eigen::JacobiSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeFullV);
     Eigen::VectorXd x = svd.matrixV().col(8);
@@ -80,7 +83,8 @@ void solvePnP(
         diag.setIdentity();
         diag(2, 2) = -1.0;
         R = U * diag * V.transpose();
-    };
+    }
+    
     if (T.z() < 0) {
         R = -R;
         T = -T;
