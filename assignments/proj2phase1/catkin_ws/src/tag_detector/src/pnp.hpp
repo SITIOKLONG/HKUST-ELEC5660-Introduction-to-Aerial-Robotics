@@ -59,6 +59,9 @@ void solvePnP(
              x(3), x(4), x(5),
              x(6), x(7), x(8);
     Eigen::Matrix3d H = K_inv * H_raw;
+    Eigen::Vector3d h1 = H.col(0);
+    Eigen::Vector3d h2 = H.col(1);
+    Eigen::Vector3d h3 = H.col(2);
     Eigen::Vector3d h1_cross_h2 = h1.cross(h2);
 
     Eigen::Matrix3d H_rot;
