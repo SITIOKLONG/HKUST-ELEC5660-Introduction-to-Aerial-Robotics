@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 import numpy as np
 import asyncio
 from sim.simulator import SimulationEngine
-from sim.trajectories import circle_trajectory, hover_trajectory, square_trajectory
+from sim.trajectories import circle_trajectory, diamond_trajectory, heart_trajectory, hover_trajectory, square_trajectory
 from sim.visualization import (
     make_3d_trajectory_plot,
     make_position_plot,
@@ -18,6 +18,8 @@ TRAJECTORIES = {
     "Hover": hover_trajectory,
     "Circle": circle_trajectory,
     "Square": square_trajectory,
+    "Diamond": diamond_trajectory,
+    "Heart": heart_trajectory,
 }
 
 # Styles
@@ -44,7 +46,7 @@ ui.add_head_html('''
 # Global state wrapper to handle UI events
 class State:
     def __init__(self):
-        self.traj_name = "Square"
+        self.traj_name = "Hover"
         self.fnoise = 1.0
 
 state = State()

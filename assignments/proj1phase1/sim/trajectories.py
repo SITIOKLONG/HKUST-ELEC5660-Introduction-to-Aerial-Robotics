@@ -87,3 +87,79 @@ def square_trajectory(t: float, true_s: np.ndarray) -> np.ndarray:
     s_des[9] = yaw_des
     s_des[10] = dyaw_des
     return s_des
+
+
+def diamond_trajectory(t: float, true_s: np.ndarray) -> np.ndarray:
+    """Diamond (rhombus) trajectory in the yz-plane with slow x drift."""
+    s_des = np.zeros(11)
+
+    Period = 12.0
+    Seg = np.sqrt(2.0)
+    Vel = Seg * 4.0 / Period
+
+    # slow x drift
+    x_des = 4.0 / 25.0 * t
+    x_vdes = 4.0 / 25.0
+    x_ades = 0.0
+
+    # wrap t into one period
+    t1 = t % Period
+    T1 = Period / 4.0
+    T2 = Period / 2.0
+    T3 = 3.0 * Period / 4.0
+
+    if t1 <= T1:
+        y_vdes = Vel;  z_vdes = Vel
+        y_des  = y_vdes * t1
+        z_des  = z_vdes * t1
+    elif t1 <= T2:
+        y_vdes = -Vel; z_vdes = Vel
+        y_des  = Seg  + y_vdes * (t1 - T1)
+        z_des  = Seg  + z_vdes * (t1 - T1)
+    elif t1 <= T3:
+        y_vdes = -Vel; z_vdes = -Vel
+        y_des  =        y_vdes * (t1 - T2)
+        z_des  = 2.0 * Seg + z_vdes * (t1 - T2)
+    else:
+        y_vdes = Vel;  z_vdes = -Vel
+        y_des  = -Seg + y_vdes * (t1 - T3)
+        z_des  = Seg  + z_vdes * (t1 - T3)
+
+    yaw_des  = np.mod(0.2 * np.pi * t, 2.0 * np.pi)
+    dyaw_des = 0.2 * np.pi
+
+    s_des[0:3] = [x_des,  y_des,  z_des]
+    s_des[3:6] = [x_vdes, y_vdes, z_vdes]
+    s_des[6:9] = [x_ades, 0.0,    0.0]
+    s_des[9]   = yaw_des
+    s_des[10]  = dyaw_des
+    return s_des
+
+
+def heart_trajectory(t: float, true_s: np.ndarray) -> np.ndarray:
+    """Heart-shaped trajectory in the xy-plane at fixed height."""
+    s_des = np.zeros(11)
+    T = 20.0       # seconds per full heart loop
+    scale = 0.50   # spatial scale (~±4 m wide, ~3.25 m tall)
+    z0 = 1.5       # constant flight height (m)
+
+    u = 2.0 * np.pi * t / T
+    du = 2.0 * np.pi / T
+    du2 = du ** 2
+
+    # Parametric heart: x = 16sin³(u),  y = 13cos(u)-5cos(2u)-2cos(3u)-cos(4u)
+    x  = scale * 16.0 * np.sin(u) ** 3
+    y  = scale * (13.0 * np.cos(u) - 5.0 * np.cos(2.0*u) - 2.0 * np.cos(3.0*u) - np.cos(4.0*u))
+
+    vx = scale * 48.0 * np.sin(u)**2 * np.cos(u) * du
+    vy = scale * (-13.0*np.sin(u) + 10.0*np.sin(2.0*u) + 6.0*np.sin(3.0*u) + 4.0*np.sin(4.0*u)) * du
+
+    ax = scale * 48.0 * (2.0*np.sin(u)*np.cos(u)**2 - np.sin(u)**3) * du2
+    ay = scale * (-13.0*np.cos(u) + 20.0*np.cos(2.0*u) + 18.0*np.cos(3.0*u) + 16.0*np.cos(4.0*u)) * du2
+
+    s_des[0:3] = [x,  y,  z0]
+    s_des[3:6] = [vx, vy, 0.0]
+    s_des[6:9] = [ax, ay, 0.0]
+    s_des[9]   = 0.0
+    s_des[10]  = 0.0
+    return s_des
