@@ -37,11 +37,11 @@ void solvePnP(
         
         A(row1, 0) = X;   A(row1, 1) = Y;   A(row1, 2) = 1.0; 
         A(row1, 3) = 0.0; A(row1, 4) = 0.0; A(row1, 5) = 0.0; 
-        A(row1, 6) = -u_n * X; A(row1, 7) = -u_n * Y; A(row1, 8) = -u_n;
+        A(row1, 6) = -u * X; A(row1, 7) = -u * Y; A(row1, 8) = -u;
 
         A(row2, 0) = 0.0; A(row2, 1) = 0.0; A(row2, 2) = 0.0; 
         A(row2, 3) = X;   A(row2, 4) = Y;   A(row2, 5) = 1.0; 
-        A(row2, 6) = -v_n * X; A(row2, 7) = -v_n * Y; A(row2, 8) = -v_n;     
+        A(row2, 6) = -v * X; A(row2, 7) = -v * Y; A(row2, 8) = -v;     
     }
     
     // 2. Solve Ax = 0 using SVD
@@ -57,9 +57,9 @@ void solvePnP(
     Eigen::Matrix3d H_raw;
     H_raw << x(0), x(1), x(2),
              x(3), x(4), x(5),
-             x(6), x(7), x(8)
+             x(6), x(7), x(8);
     Eigen::Matrix3d H = K_inv * H_raw;
-    Eigen::Vector3d h1_cross_h2 = h1.cross(h2) 
+    Eigen::Vector3d h1_cross_h2 = h1.cross(h2);
 
     Eigen::Matrix3d H_rot;
     H_rot << h1, h2, h1_cross_h2;
@@ -68,7 +68,7 @@ void solvePnP(
     Eigen::Matrix3d U = svd_R.matrixU();
     Eigen::Matrix3d V = svd_R.matrixV();
     
-    R = U * V.transpose() 
+    R = U * V.transpose(); 
     T = h3 / h1.norm();   
 
     // 4. Enforce SO(3) constraint on R using SVD
