@@ -223,6 +223,12 @@ int main(int argc, char **argv)
     param_reader["camera_matrix"] >> K;
     param_reader["distortion_coefficients"] >> D;
 
+    // ADD THIS SAFETY CHECK:
+    if (K.empty()) {
+        ROS_ERROR("CRITICAL ERROR: Camera Matrix K is empty! Check if cam_cal_file path is correct: %s", cam_cal.c_str());
+        return -1; // Gracefully exit instead of crashing
+    }
+
     //init window for visualization
     cv::namedWindow("in", 1);
 
