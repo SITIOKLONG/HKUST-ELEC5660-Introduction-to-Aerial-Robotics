@@ -68,25 +68,27 @@ void solvePnP(
     Eigen::Vector3d h1_cross_h2 = h1.cross(h2);
 
     Eigen::Matrix3d H_rot;
-    H_rot << h1, h2, h1_cross_h2;
+    H_rot.col(0) = h1.normalized();
+    H_rot.col(1) = h2.normalized();
+    H_rot.col(2) = h1_cross_h2.normalized();
 
     Eigen::JacobiSVD<Eigen::Matrix3d> svd_R(H_rot, Eigen::ComputeFullU | Eigen::ComputeFullV);
     Eigen::Matrix3d U = svd_R.matrixU();
     Eigen::Matrix3d V = svd_R.matrixV();
     
     R = U * V.transpose(); 
-    T = h3 / h1.norm();   
+    T = h3 / ((h1.norm() + h2.norm()) * 0.5);
 
     // 4. Enforce SO(3) constraint on R using SVD
     if (R.determinant() < 0) {
-        Eigen::Matrix3d diag;
-        diag.setIdentity();
+        Eigen::Matrix3d diag = Eigen::Matrix3d::Identity();
         diag(2, 2) = -1.0;
         R = U * diag * V.transpose();
     }
-    
+    // depth check
     if (T.z() < 0) {
-        R = -R;
         T = -T;
+        R.col(0) = -R.col(0);
+        R.col(1) = -R.col(1);
     }
 }
