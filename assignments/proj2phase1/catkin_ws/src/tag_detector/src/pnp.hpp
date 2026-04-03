@@ -20,11 +20,7 @@ void solvePnP(
     // TODO: Implement the DLT PnP Algorithm
     
     // 1. Construct the matrix A
-    Eigen::Matrix3d K_eigen;
-    K_eigen << K.at<double>(0,0), K.at<double>(0,1), K.at<double>(0,2),
-               K.at<double>(1,0), K.at<double>(1,1), K.at<double>(1,2),
-               K.at<double>(2,0), K.at<double>(2,1), K.at<double>(2,2);
-    Eigen::Matrix3d K_inv = K_eigen.inverse();;
+;
 
     Eigen::MatrixXd A(2 * n, 9);
     // set the points to matrix A
@@ -32,10 +28,8 @@ void solvePnP(
         double X = pts_3[i].x;
         double Y = pts_3[i].y;
         
-        Eigen::Vector3d p_img(pts_2[i].x, pts_2[i].y, 1.0);
-        Eigen::Vector3d p_norm = K_inv * p_img;
-        double u_n = p_norm.x() / p_norm.z();
-        double v_n = p_norm.y() / p_norm.z();
+        double u = pts_2[i].x;
+        double v = pts_2[i].y;
         
         // the row index for the current point
         int row1 = 2 * i;
@@ -51,13 +45,20 @@ void solvePnP(
     }
     
     // 2. Solve Ax = 0 using SVD
+    Eigen::Matrix3d K_eigen;
+    K_eigen << K.at<double>(0,0), K.at<double>(0,1), K.at<double>(0,2),
+               K.at<double>(1,0), K.at<double>(1,1), K.at<double>(1,2),
+               K.at<double>(2,0), K.at<double>(2,1), K.at<double>(2,2);
+    Eigen::Matrix3d K_inv = K_eigen.inverse();
     Eigen::JacobiSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeFullV);
     Eigen::VectorXd x = svd.matrixV().col(8);
     
     // 3. Extract R and T
-    Eigen::Vector3d h1(x(0), x(3), x(6));
-    Eigen::Vector3d h2(x(1), x(4), x(7));
-    // Eigen::Vector3d h3(x(2), x(5), x(8)); 
+    Eigen::Matrix3d H_raw;
+    H_raw << x(0), x(1), x(2),
+             x(3), x(4), x(5),
+             x(6), x(7), x(8)
+    Eigen::Matrix3d H = K_inv * H_raw;
     Eigen::Vector3d h1_cross_h2 = h1.cross(h2) 
 
     Eigen::Matrix3d H_rot;
@@ -68,7 +69,7 @@ void solvePnP(
     Eigen::Matrix3d V = svd_R.matrixV();
     
     R = U * V.transpose() 
-    T = h1_cross_h2 / h1.norm();   
+    T = h3 / h1.norm();   
 
     // 4. Enforce SO(3) constraint on R using SVD
     if (R.determinant() < 0) {
