@@ -51,7 +51,7 @@ void gaussNewtonPnP(const std::vector<cv::Point3f> &pts_3,
                     const std::vector<cv::Point2f> &pts_2,
                     const Eigen::Matrix3d &K,
                     Eigen::Matrix3d &R, // in/out
-                    Eigen::Vector3d &t, int max_iter = 100, double tol = 1e-12) {
+                    Eigen::Vector3d &t, int max_iter = 100, double tol = 1e-6) {
   size_t n = pts_3.size();
   double last_error = 1e10;
 
@@ -77,7 +77,7 @@ void gaussNewtonPnP(const std::vector<cv::Point3f> &pts_3,
     }
 
     // converge
-    if (std::abs(last_error - total_error) < tol * last_error) {
+    if (std::abs(last_error - total_error) < tol) {
     std::cout << "[GN] CONVERGED" << iter << "err: " << total_error <<"\n";
       break;
     }
