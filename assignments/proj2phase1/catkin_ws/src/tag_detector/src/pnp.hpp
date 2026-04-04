@@ -18,7 +18,8 @@ Eigen::Matrix<double, 2, 6> computeJacobian(const Eigen::Matrix3d &K,
                                             const Eigen::Matrix3d &R,
                                             const Eigen::Vector3d &t,
                                             const Eigen::Vector3d &X_w) {
-  Eigen::Vector3d X_c = R * X_w + t;
+  Eigen::Vector3d X_r = R * X_w;      // Point without translation
+  Eigen::Vector3d X_c = X_r + t;      // Fully projected point
   double x = X_c.x(), y = X_c.y(), z = X_c.z();
   double inv_z = 1.0 / z;
   double inv_z2 = inv_z * inv_z;
@@ -32,9 +33,10 @@ Eigen::Matrix<double, 2, 6> computeJacobian(const Eigen::Matrix3d &K,
   Eigen::Matrix3d d_Xc_dt = Eigen::Matrix3d::Identity();
 
   // ∂X_c/∂θ
-  // ∂(R·X_w)/∂θ ≈ -[X_c]× (反对称矩阵)
+  // ∂(R·X_w)/∂θ ≈ -[R·X_w]× (反对称矩阵)
   Eigen::Matrix3d d_Xc_dtheta;
-  d_Xc_dtheta << 0, -z, y, z, 0, -x, -y, x, 0;
+  double rx = X_r.x(), ry = X_r.y(), rz = X_r.z();
+  d_Xc_dtheta << 0, -rz, ry, rz, 0, -rx, -ry, rx, 0;
   d_Xc_dtheta = -d_Xc_dtheta;
 
   // chain rule
@@ -49,7 +51,7 @@ void gaussNewtonPnP(const std::vector<cv::Point3f> &pts_3,
                     const std::vector<cv::Point2f> &pts_2,
                     const Eigen::Matrix3d &K,
                     Eigen::Matrix3d &R, // in/out
-                    Eigen::Vector3d &t, int max_iter = 20, double tol = 1e-6) {
+                    Eigen::Vector3d &t, int max_iter = 100, double tol = 1e-12) {
   size_t n = pts_3.size();
   double last_error = 1e10;
 
@@ -76,6 +78,7 @@ void gaussNewtonPnP(const std::vector<cv::Point3f> &pts_3,
 
     // converge
     if (std::abs(last_error - total_error) < tol * last_error) {
+    std::cout << "[GN] CONVERGED" << iter << "err: " << total_error <<"\n";
       break;
     }
     last_error = total_error;
@@ -147,16 +150,13 @@ void solvePnP(const std::vector<cv::Point3f> &pts_3,
     A(row2, 8) = -v;
   }
 
-  // 2. Safely Convert K to double and build K_eigen
-  cv::Mat K_double;
-  K.convertTo(K_double, CV_64F); // Protects against CV_32F (float) crash
-
+  // 2. build K_eigen
   Eigen::Matrix3d K_eigen;
-  K_eigen << K_double.at<double>(0, 0), K_double.at<double>(0, 1),
-      K_double.at<double>(0, 2), K_double.at<double>(1, 0),
-      K_double.at<double>(1, 1), K_double.at<double>(1, 2),
-      K_double.at<double>(2, 0), K_double.at<double>(2, 1),
-      K_double.at<double>(2, 2);
+  K_eigen << K.at<double>(0, 0), K.at<double>(0, 1),
+      K.at<double>(0, 2), K.at<double>(1, 0),
+      K.at<double>(1, 1), K.at<double>(1, 2),
+      K.at<double>(2, 0), K.at<double>(2, 1),
+      K.at<double>(2, 2);
 
   Eigen::Matrix3d K_inv = K_eigen.inverse();
   Eigen::JacobiSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeFullV);
@@ -182,16 +182,18 @@ void solvePnP(const std::vector<cv::Point3f> &pts_3,
   R = U * V.transpose();
   T = h3 / h1.norm();
 
-  // Refine with Gauss-Newton
-  gaussNewtonPnP(pts_3, pts_2, K, R, T);
-
   // 4. Enforce SO(3) constraint on R using SVD
   if (R.determinant() < 0) {
     R.col(2) *= -1;
   }
 
+  // Depth check
   if (T.z() < 0) {
-    R = -R;
+    R.col(0) *= -1;
+    R.col(1) *= -1;
     T = -T;
   }
+
+  // Refine with Gauss-Newton (pass Eigen K)
+  gaussNewtonPnP(pts_3, pts_2, K_eigen, R, T);
 }
