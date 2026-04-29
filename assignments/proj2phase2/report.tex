@@ -1,0 +1,51 @@
+\documentclass[11pt]{article}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+\geometry{a4paper, margin=1in}
+
+\title{Project 2 Phase 2: Stereo Visual Odometry}
+\author{SIT, Iok Long, SID: 21100786}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Methodology}
+
+\paragraph{Step 1: Feature Tracking and Extraction}
+The system receives a sequence of stereo image pairs incrementally. New features are extracted in the current left image to ensure there are always sufficient landmarks (bounded by \texttt{MAX\_CNT = 180} and \texttt{MIN\_DIST = 30}). Features are tracked from the keyframe to the current frame to maintain established 2D-3D correspondences.
+
+\paragraph{Step 2: Stereo Matching and Triangulation}
+Newly extracted features in the left image are matched with the right image using Lucas-Kanade optical flow. With the stereo baseline, known extrinsics, and intrinsic camera matrix formulations, corresponding 2D points in the left and right cameras are triangulated into 3D using basic epipolar geometry.
+
+\paragraph{Step 3: Motion Estimation (PnP)}
+We estimate the relative rotation \(R\) and translation \(t\) of the current frame relative to the keyframe by solving the Perspective-n-Point (PnP) problem using 2D-3D correspondences. RANSAC is integrated to discard mismatched outliers (bad correspondences), ensuring stable pose estimates.
+
+\paragraph{Step 4: Update States and Keyframes}
+State vectors of the updated poses and 3D point cloud are continuously accumulated and advertised to the map. The current frame is promoted to a new keyframe whenever the estimated spatial translation or rotation exceeds specific thresholds (\texttt{TRANSLATION\_THRESHOLD: 0.05}, \texttt{ROTATION\_THRESHOLD: 0.05}), initiating a fresh reference for tracking subsequent frames. 
+
+\section{Results}
+
+\subsection{Stereo VO Visualization}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.45\textwidth]{assets/1.png}
+    \caption{Estimated camera trajectory and keyframe path. Reconstructed sparse 3D point cloud map in RViz.}
+    \label{fig:rviz_pose}
+\end{figure}
+
+\section{Analysis}
+\paragraph{Robustness:} By defining a minimum distance configuration (\texttt{MIN\_DIST=30}) and restricting the maximum features to 180, we strictly maintained feature uniformity. Promoting new keyframes accurately when minimum translation (0.05m) and rotation bindings were triggered ensured less accumulative error buildup.
+\paragraph{Drift and Deficiencies:} Constant scene tracking performs well. However, rapid turning loops or feature-absent blank textures still introduce accumulated drifts in relative translations because the visual odometry runs incrementally without global backend bundle adjustment looping.
+
+\section{References}
+\begin{enumerate}
+    \item ELEC 5660 Course Materials and Slides.
+    \item VINS-Mono / VINS-Fusion Feature Trackers architectures.
+\end{enumerate}
+
+\end{document}

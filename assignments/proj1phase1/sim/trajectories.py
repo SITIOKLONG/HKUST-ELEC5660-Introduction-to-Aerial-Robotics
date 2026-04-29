@@ -9,39 +9,61 @@ def hover_trajectory(t: float, true_s: np.ndarray) -> np.ndarray:
 
 
 def circle_trajectory(t: float, true_s: np.ndarray) -> np.ndarray:
-    """Helix in the xy-plane with growing radius."""
+    """Helix with oscillating radius (big -> small -> big), Z max = 1.5m, more circles"""
     s_des = np.zeros(11)
-    omega = 25.0
-
+    
+    omega = 120.0                    # 角速度 (deg/s)，調大可以跑更多圈
+    T = 30.0                        # 總飛行時間 (秒)，可自行調整
+    R_max = 0.6                     # 最大半徑
+    Z_max = 1.5                     # 最大高度
+    
+    # ====================== 角度 ======================
     angle = t * omega / 180.0 * np.pi
-    x_des = 4.0 * np.cos(angle) * t / omega
-    y_des = 4.0 * np.sin(angle) * t / omega
-    z_des = 3.0 / 25.0 * t
-
-    x_vdes = (4.0 * np.cos(angle) - omega / 180.0 * np.pi * 4.0 * np.sin(angle) * t) / omega
-    y_vdes = (4.0 * np.sin(angle) + omega / 180.0 * np.pi * 4.0 * np.cos(angle) * t) / omega
-    z_vdes = 3.0 / 25.0
-
-    x_ades = (
-        -2.0 * omega / 180.0 * np.pi * 4.0 * np.sin(angle)
-        - omega / 180.0 * np.pi * omega / 180.0 * np.pi * 4.0 * np.cos(angle) * t
-    ) / omega
-    y_ades = (
-        2.0 * omega / 180.0 * np.pi * 4.0 * np.cos(angle)
-        - omega / 180.0 * np.pi * omega / 180.0 * np.pi * 4.0 * np.sin(angle) * t
-    ) / omega
+    
+    # ====================== 半徑 (由大→小→大) ======================
+    # 使用 sin 波讓半徑週期性變化
+    radius = R_max * (0.65 + 0.35 * np.sin(3.0 * np.pi * t / T))   # 3.0 控制變化頻率
+    
+    # ====================== 位置 ======================
+    x_des = radius * np.cos(angle)
+    y_des = radius * np.sin(angle)
+    z_des = (Z_max / T) * t                     # 均勻上升到 1.5m
+    
+    # ====================== 速度 ======================
+    # 對 radius 和 angle 求導後得到
+    dr_dt = R_max * 0.35 * (3.0 * np.pi / T) * np.cos(3.0 * np.pi * t / T)
+    
+    x_vdes = dr_dt * np.cos(angle) - radius * np.sin(angle) * (omega * np.pi / 180.0)
+    y_vdes = dr_dt * np.sin(angle) + radius * np.cos(angle) * (omega * np.pi / 180.0)
+    z_vdes = Z_max / T
+    
+    # ====================== 加速度 ======================
+    # 這裡使用數值近似（二次微分），比較穩定
+    d2r_dt2 = -R_max * 0.35 * (3.0 * np.pi / T)**2 * np.sin(3.0 * np.pi * t / T)
+    omega_rad = omega * np.pi / 180.0
+    
+    x_ades = (d2r_dt2 * np.cos(angle) 
+              - 2 * dr_dt * np.sin(angle) * omega_rad 
+              - radius * np.cos(angle) * omega_rad**2)
+    
+    y_ades = (d2r_dt2 * np.sin(angle) 
+              + 2 * dr_dt * np.cos(angle) * omega_rad 
+              + radius * np.sin(angle) * omega_rad**2)
+    
     z_ades = 0.0
-
-    yaw_des = np.mod(0.1 * np.pi * t, 2.0 * np.pi)
-    dyaw_des = 0.1 * np.pi
-
-    s_des[0:3] = [x_des, y_des, z_des]
-    s_des[3:6] = [x_vdes, y_vdes, z_vdes]
-    s_des[6:9] = [x_ades, y_ades, z_ades]
-    s_des[9] = yaw_des
-    s_des[10] = dyaw_des
+    
+    # ====================== 偏航 ======================
+    yaw_des = np.mod(0.08 * np.pi * t, 2.0 * np.pi)   # 緩慢轉向
+    dyaw_des = 0.08 * np.pi
+    
+    # ====================== 填入 s_des ======================
+    s_des[0:3] = [x_des, y_des, z_des]      # position
+    s_des[3:6] = [x_vdes, y_vdes, z_vdes]  # velocity
+    s_des[6:9] = [x_ades, y_ades, z_ades]  # acceleration
+    s_des[9]   = yaw_des
+    s_des[10]  = dyaw_des
+    
     return s_des
-
 
 def square_trajectory(t: float, true_s: np.ndarray) -> np.ndarray:
     """Piecewise linear trajectory through the five waypoints."""
