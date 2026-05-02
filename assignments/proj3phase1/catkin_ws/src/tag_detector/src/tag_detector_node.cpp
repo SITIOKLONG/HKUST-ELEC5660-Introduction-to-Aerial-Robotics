@@ -163,7 +163,9 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 {
     double t = clock();
     cv_bridge::CvImagePtr bridge_ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);
-    MDetector.detect(bridge_ptr->image, Markers, CamParam, MarkerSize, false);
+    //由于 aarch64 下 libaruco.so 的 calculateExtrinsics 调用 cv::solvePnP 必定引发段错误(ABI冲突)
+    //设置 MarkerSize 为 -1 才是设计上安全跳过错误的自带 PnP 函数的做法。
+    MDetector.detect(bridge_ptr->image, Markers, CamParam, -1, false);
     ROS_DEBUG("time cost: %f\n", (clock() - t) / CLOCKS_PER_SEC);
 
     vector<int> pts_id;
