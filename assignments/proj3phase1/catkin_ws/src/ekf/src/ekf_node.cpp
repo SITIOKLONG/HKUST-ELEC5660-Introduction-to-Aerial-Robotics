@@ -4,11 +4,13 @@
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/Range.h>
 #include <nav_msgs/Odometry.h>
+#include <std_msgs/Float64.h>
 #include <Eigen/Eigen>
 
 using namespace std;
 using namespace Eigen;
 ros::Publisher odom_pub;
+ros::Publisher maha_pub;
 MatrixXd Q = MatrixXd::Identity(12, 12);
 MatrixXd Rt = MatrixXd::Identity(6,6);
 VectorXd x = VectorXd::Zero(15);
@@ -164,9 +166,9 @@ void imu_callback(const sensor_msgs::Imu::ConstPtr &msg)
     // （随机游走只增加不确定性，不改变均值）
 
     MatrixXd F_t = MatrixXd::Identity(15,15) + F * dt;
-    MatrixXd V_t = U;
+    MatrixXd V_t = U * dt;
 
-    P = F_t * P * F_t.transpose() + V_t * Q * V_t.transpose() * dt; // only 1 *dt
+    P = F_t * P * F_t.transpose() + V_t * Q * V_t.transpose(); // only 1 *dt
 }
 
 // Rotation from the camera frame to the IMU frame.
@@ -233,6 +235,9 @@ void odom_callback(const nav_msgs::Odometry::ConstPtr &msg)
 
     Matrix<double, 6, 6> S = C * P * C.transpose() + Rt;  // 新息协方差
     const double maha = y.transpose() * S.inverse() * y;
+    std_msgs::Float64 maha_msg;
+    maha_msg.data = maha;
+    maha_pub.publish(maha_msg);
     if (maha > 16.81) {      // x^2(6) = 16.81
         ROS_WARN_STREAM_THROTTLE(1.0, "Innovation gated (maha=" << maha << ")");
         return;
@@ -281,6 +286,7 @@ int main(int argc, char **argv)
     ros::Subscriber s1 = n.subscribe("imu", 1000, imu_callback);
     ros::Subscriber s2 = n.subscribe("tag_odom", 1000, odom_callback);
     odom_pub = n.advertise<nav_msgs::Odometry>("ekf_odom", 100);
+    maha_pub = n.advertise<std_msgs::Float64>("maha", 100);
     Rcam = Quaterniond(0, 1, 0, 0).toRotationMatrix();
     cout << "R_cam" << endl << Rcam << endl;
     // Q: process noise covariance. Rt: visual measurement noise covariance.
@@ -296,10 +302,10 @@ int main(int argc, char **argv)
 
     // 过程噪声 Q (连续谱密度)
     Q.setIdentity();
-    Q.diagonal() << 2.0, 2.0, 2.0,      // gyro noise (rad/s)²/Hz  （原 0.01 → 0.1）
-                    5.0, 5.0, 5.0,      // acc noise (m/s²)²/Hz   （原 0.1 → 1.0）
-                    5e-3, 5e-3, 5e-3,   // gyro bias random walk （原 1e-5 → 1e-3）
-                    5e-2, 5e-2, 5e-2;   // acc bias random walk  （原 1e-4 → 1e-2）
+    Q.diagonal() << 200.0, 200.0, 200.0,      // gyro noise (rad/s)²/Hz  （原 0.01 → 0.1）
+                    500.0, 500.0, 500.0,      // acc noise (m/s²)²/Hz   （原 0.1 → 1.0）
+                    5e-1, 5e-1, 5e-1,   // gyro bias random walk （原 1e-5 → 1e-3）
+                    5, 5, 5;   // acc bias random walk  （原 1e-4 → 1e-2）
 
     // 测量噪声 Rt (视觉)
     Rt.setIdentity();
