@@ -38,7 +38,8 @@ generate_messages(
 set(Eigen3_INCLUDE_DIRS ${EIGEN3_INCLUDE_DIR})
 
 catkin_package(
-  INCLUDE_DIRS include
+        INCLUDE_DIRS include
+        CATKIN_DEPENDS geometry_msgs std_msgs message_runtime
 )
 
 
@@ -63,6 +64,7 @@ add_executable(${PROJECT_NAME}
         src/parameters.cpp
         src/estimator.cpp
         )
+add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(${PROJECT_NAME}
                 ${catkin_LIBRARIES}
                 ${OpenCV_LIBS}

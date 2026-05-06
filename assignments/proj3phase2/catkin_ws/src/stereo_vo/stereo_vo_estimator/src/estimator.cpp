@@ -87,26 +87,116 @@ bool Estimator::inputImage(ros::Time time_stamp, const cv::Mat &_img, const cv::
 
   vector<cv::Point2f> left_pts_2d, right_pts_2d;
   vector<cv::Point3f> key_pts_3d;
+  bool pose_estimated = false;
 
   c_R_k.setIdentity();
   c_t_k.setZero();
 
   if (init_finish)
   {
-    // To do: match features between the key frame and the current left image
+    // Track 2D-3D correspondences from keyframe to current left image.
+    if (trackFeatureBetweenFrames(key_frame, _img, key_pts_3d, left_pts_2d))
+    {
+      vector<cv::Point2f> cur_un_pts = undistortedPts(left_pts_2d, m_camera[0]);
+      pose_estimated = estimateTBetweenFrames(key_pts_3d, cur_un_pts, c_R_k, c_t_k);
+    }
 
-    // To do: undistort the points of the left image and compute relative motion with the key frame.
+    if (pose_estimated)
+    {
+      fail_cnt = 0;
+    }
+    else
+    {
+      fail_cnt++;
+      key_pts_3d.clear();
+    }
 
   }
 
-  // To do: extract new features for the current frame.
+  // Extract new features in current left image and match to right image.
+  left_pts_2d.clear();
+  right_pts_2d.clear();
+  extractNewFeatures(_img, left_pts_2d);
+  bool stereo_matched = trackFeatureLeftRight(_img, _img1, left_pts_2d, right_pts_2d);
 
-  // To do: compute the camera pose of the current frame.
+  // Compute current camera pose in world frame.
+  if (!init_finish)
+  {
+    cur_frame.w_R_c = key_frame.w_R_c;
+    cur_frame.w_t_c = key_frame.w_t_c;
+  }
+  else if (pose_estimated)
+  {
+    // p_c = c_R_k * p_k + c_t_k
+    cur_frame.w_R_c = key_frame.w_R_c * c_R_k.transpose();
+    cur_frame.w_t_c = key_frame.w_t_c - cur_frame.w_R_c * c_t_k;
+  }
+  else
+  {
+    // Keep continuity when PnP fails temporarily.
+    cur_frame.w_R_c = prev_frame.w_R_c;
+    cur_frame.w_t_c = prev_frame.w_t_c;
+  }
 
-  // To do: undistort the 2d points of the current frame and generate the corresponding 3d points.
+  // Triangulate new 3D points from stereo correspondences.
+  cur_frame.xyz.clear();
+  cur_frame.uv.clear();
+  if (stereo_matched)
+  {
+    vector<cv::Point2f> left_un_pts = undistortedPts(left_pts_2d, m_camera[0]);
+    vector<cv::Point2f> right_un_pts = undistortedPts(right_pts_2d, m_camera[1]);
+    cur_frame.uv = left_pts_2d; // keep pixel coordinates for future LK tracking
+    generate3dPoints(left_un_pts, right_un_pts, cur_frame.xyz, cur_frame.uv);
+  }
 
   // Change key frame
-  if (c_t_k.norm() > TRANSLATION_THRESHOLD || acos(Quaterniond(c_R_k).w()) * 2.0 > ROTATION_THRESHOLD || key_pts_3d.size() < FEATURE_THRESHOLD || !init_finish)
+  double rot_w = Quaterniond(c_R_k).w();
+  if (rot_w > 1.0)
+    rot_w = 1.0;
+  if (rot_w < -1.0)
+    rot_w = -1.0;
+  double rot_angle = acos(rot_w) * 2.0;
+
+  bool switch_key_frame = false;
+  size_t tracked_cnt = key_pts_3d.size();
+  size_t stereo_cnt = cur_frame.xyz.size();
+  if (!init_finish)
+  {
+    switch_key_frame = true;
+  }
+  else
+  {
+    double key_age = (cur_frame.frame_time - key_frame.frame_time).toSec();
+    bool motion_trigger = c_t_k.norm() > TRANSLATION_THRESHOLD || rot_angle > ROTATION_THRESHOLD;
+    bool low_feature_trigger = tracked_cnt < static_cast<size_t>(FEATURE_THRESHOLD);
+    bool critical_low_track = tracked_cnt < static_cast<size_t>(MIN_CNT);
+    const double MIN_KEYFRAME_DT = 0.20;
+
+    if (pose_estimated)
+    {
+      // Avoid keyframe chatter unless motion is significant or tracked features are critically low.
+      if ((motion_trigger || low_feature_trigger) && (key_age > MIN_KEYFRAME_DT || critical_low_track))
+      {
+        switch_key_frame = true;
+      }
+    }
+    else
+    {
+      // If pose fails for a few frames, re-bootstrap with current stereo points.
+      if (fail_cnt > 3 && stereo_cnt >= static_cast<size_t>(MIN_CNT))
+      {
+        switch_key_frame = true;
+      }
+    }
+  }
+
+  ROS_INFO_THROTTLE(0.5, "VO stats tracked:%lu stereo:%lu pose:%d fail:%d",
+                    static_cast<unsigned long>(tracked_cnt),
+                    static_cast<unsigned long>(stereo_cnt),
+                    pose_estimated,
+                    fail_cnt);
+
+  if (switch_key_frame)
   {
     key_frame = cur_frame;
     ROS_INFO("Change key frame to current frame.");
@@ -126,16 +216,121 @@ bool Estimator::trackFeatureBetweenFrames(const Estimator::frame &keyframe, cons
                                           vector<cv::Point2f> &cur_pts_2d)
 {
 
-  // To do: track features between the key frame and the current frame to obtain corresponding 2D, 3D points.
+  key_pts_3d.clear();
+  cur_pts_2d.clear();
 
-  return true;
+  if (keyframe.img.empty() || cur_img.empty() || keyframe.uv.empty() || keyframe.xyz.empty())
+  {
+    return false;
+  }
+
+  size_t pt_num = std::min(keyframe.uv.size(), keyframe.xyz.size());
+  if (pt_num == 0)
+  {
+    return false;
+  }
+
+  vector<cv::Point2f> key_pts_2d(keyframe.uv.begin(), keyframe.uv.begin() + pt_num);
+  key_pts_3d.assign(keyframe.xyz.begin(), keyframe.xyz.begin() + pt_num);
+  cur_pts_2d = key_pts_2d;
+
+  vector<uchar> status;
+  vector<float> err;
+  cv::calcOpticalFlowPyrLK(keyframe.img, cur_img, key_pts_2d, cur_pts_2d, status, err, cv::Size(21, 21), 3);
+
+  if (FLOW_BACK)
+  {
+    vector<cv::Point2f> reverse_pts = key_pts_2d;
+    vector<uchar> reverse_status;
+    vector<float> reverse_err;
+    cv::calcOpticalFlowPyrLK(cur_img, keyframe.img, cur_pts_2d, reverse_pts, reverse_status, reverse_err, cv::Size(21, 21), 3);
+
+    for (size_t i = 0; i < status.size(); i++)
+    {
+      status[i] = status[i] && reverse_status[i] && distance(key_pts_2d[i], reverse_pts[i]) < 1.0;
+    }
+  }
+
+  for (size_t i = 0; i < status.size(); i++)
+  {
+    if (status[i] && !inBorder(cur_pts_2d[i], cur_img.rows, cur_img.cols))
+      status[i] = 0;
+  }
+
+  reduceVector<cv::Point3f>(key_pts_3d, status);
+  reduceVector<cv::Point2f>(cur_pts_2d, status);
+
+  return cur_pts_2d.size() >= static_cast<size_t>(MIN_CNT);
 }
 
 bool Estimator::estimateTBetweenFrames(vector<cv::Point3f> &key_pts_3d,
                                        vector<cv::Point2f> &cur_pts_2d, Matrix3d &R, Vector3d &t)
 {
 
-  // To do: calculate relative pose between the key frame and the current frame using the matched 2d-3d points
+  R.setIdentity();
+  t.setZero();
+
+  if (key_pts_3d.size() < 4 || cur_pts_2d.size() < 4 || key_pts_3d.size() != cur_pts_2d.size())
+  {
+    return false;
+  }
+
+  cv::Mat K = cv::Mat::eye(3, 3, CV_64F);
+  cv::Mat rvec, tvec;
+  vector<int> inliers;
+
+  const double ransac_reproj_err = 2.0 / 380.0;
+  bool pnp_ok = cv::solvePnPRansac(key_pts_3d, cur_pts_2d, K, cv::Mat(), rvec, tvec, false,
+                                   100, ransac_reproj_err, 0.99, inliers, cv::SOLVEPNP_EPNP);
+
+  if (!pnp_ok || inliers.size() < 4)
+  {
+    return false;
+  }
+
+  vector<uchar> status(key_pts_3d.size(), 0);
+  for (size_t i = 0; i < inliers.size(); i++)
+  {
+    status[inliers[i]] = 1;
+  }
+  reduceVector<cv::Point3f>(key_pts_3d, status);
+  reduceVector<cv::Point2f>(cur_pts_2d, status);
+
+  if (key_pts_3d.size() < 4)
+  {
+    return false;
+  }
+
+  // Refine on inliers.
+  cv::solvePnP(key_pts_3d, cur_pts_2d, K, cv::Mat(), rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+
+  cv::Mat cv_R;
+  cv::Rodrigues(rvec, cv_R);
+  cv::cv2eigen(cv_R, R);
+  cv::cv2eigen(tvec, t);
+
+  // Additional reprojection filtering in normalized plane.
+  vector<uchar> reproj_status(key_pts_3d.size(), 1);
+  const double reproj_th = 3.0 / 380.0;
+  for (size_t i = 0; i < key_pts_3d.size(); i++)
+  {
+    if (reprojectionError(R, t, key_pts_3d[i], cur_pts_2d[i]) > reproj_th)
+      reproj_status[i] = 0;
+  }
+
+  reduceVector<cv::Point3f>(key_pts_3d, reproj_status);
+  reduceVector<cv::Point2f>(cur_pts_2d, reproj_status);
+
+  const size_t MIN_PNP_INLIERS = static_cast<size_t>(std::max(8, MIN_CNT / 2));
+  if (key_pts_3d.size() < MIN_PNP_INLIERS)
+  {
+    return false;
+  }
+
+  cv::solvePnP(key_pts_3d, cur_pts_2d, K, cv::Mat(), rvec, tvec, true, cv::SOLVEPNP_ITERATIVE);
+  cv::Rodrigues(rvec, cv_R);
+  cv::cv2eigen(cv_R, R);
+  cv::cv2eigen(tvec, t);
 
   return true;
 }
@@ -143,16 +338,85 @@ bool Estimator::estimateTBetweenFrames(vector<cv::Point3f> &key_pts_3d,
 void Estimator::extractNewFeatures(const cv::Mat &img, vector<cv::Point2f> &uv)
 {
 
-  //To do: extract the new 2d features of img and store them in uv.
+  if (img.empty())
+  {
+    uv.clear();
+    return;
+  }
+
+  if (static_cast<int>(uv.size()) >= MAX_CNT)
+  {
+    return;
+  }
+
+  cv::Mat mask(img.rows, img.cols, CV_8UC1, cv::Scalar(255));
+  for (size_t i = 0; i < uv.size(); i++)
+  {
+    cv::circle(mask, uv[i], MIN_DIST, 0, -1);
+  }
+
+  vector<cv::Point2f> new_pts;
+  int need_cnt = MAX_CNT - static_cast<int>(uv.size());
+  cv::goodFeaturesToTrack(img, new_pts, need_cnt, 0.01, MIN_DIST, mask);
+
+  if (!new_pts.empty())
+  {
+    cv::cornerSubPix(img, new_pts, cv::Size(5, 5), cv::Size(-1, -1),
+                     cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 20, 0.03));
+  }
+
+  for (size_t i = 0; i < new_pts.size(); i++)
+  {
+    if (inBorder(new_pts[i], img.rows, img.cols))
+      uv.push_back(new_pts[i]);
+  }
 }
 
 bool Estimator::trackFeatureLeftRight(const cv::Mat &_img, const cv::Mat &_img1,
                                       vector<cv::Point2f> &left_pts, vector<cv::Point2f> &right_pts)
 {
 
-  // To do: track features left to right frame and obtain corresponding 2D points.
+  right_pts.clear();
 
-  return true;
+  if (_img.empty() || _img1.empty() || left_pts.empty())
+  {
+    return false;
+  }
+
+  right_pts = left_pts;
+  vector<uchar> status;
+  vector<float> err;
+  cv::calcOpticalFlowPyrLK(_img, _img1, left_pts, right_pts, status, err, cv::Size(21, 21), 3);
+
+  if (FLOW_BACK)
+  {
+    vector<cv::Point2f> reverse_pts = left_pts;
+    vector<uchar> reverse_status;
+    vector<float> reverse_err;
+    cv::calcOpticalFlowPyrLK(_img1, _img, right_pts, reverse_pts, reverse_status, reverse_err, cv::Size(21, 21), 3);
+
+    for (size_t i = 0; i < status.size(); i++)
+    {
+      status[i] = status[i] && reverse_status[i] && distance(left_pts[i], reverse_pts[i]) < 1.0;
+    }
+  }
+
+  for (size_t i = 0; i < status.size(); i++)
+  {
+    if (!status[i])
+      continue;
+
+    if (!inBorder(right_pts[i], _img1.rows, _img1.cols))
+      status[i] = 0;
+
+    if (fabs(left_pts[i].y - right_pts[i].y) > 5.0)
+      status[i] = 0;
+  }
+
+  reduceVector<cv::Point2f>(left_pts, status);
+  reduceVector<cv::Point2f>(right_pts, status);
+
+  return !left_pts.empty();
 }
 
 void Estimator::generate3dPoints(const vector<cv::Point2f> &left_pts,
@@ -219,10 +483,31 @@ void Estimator::reduceVector(vector<Derived> &v, vector<uchar> status)
 void Estimator::updateLatestStates(frame &latest_frame)
 {
 
-  // To do: update the latest_time, latest_pointcloud, latest_P, latest_Q, latest_rel_P and latest_rel_Q.
-  // latest_P and latest_Q should be the pose of the body (IMU) in the world frame.
-  // latest_rel_P and latest_rel_Q should be the relative pose of the current body frame relative to the body frame of the key frame.
-  // latest_pointcloud should be in the current camera frame.
+  latest_time = latest_frame.frame_time;
+  rel_key_time = key_frame.frame_time;
+  latest_pointcloud = latest_frame.xyz;
+
+  // body_T_cam is provided; convert camera pose to body pose using cam_T_body = inverse(body_T_cam).
+  Matrix3d R_cb = ric[0].transpose();
+  Vector3d t_cb = -R_cb * tic[0];
+
+  Matrix3d w_R_b = latest_frame.w_R_c * R_cb;
+  Vector3d w_t_b = latest_frame.w_R_c * t_cb + latest_frame.w_t_c;
+
+  latest_Q = Quaterniond(w_R_b);
+  latest_Q.normalize();
+  latest_P = w_t_b;
+
+  Matrix3d w_R_bk = key_frame.w_R_c * R_cb;
+  Vector3d w_t_bk = key_frame.w_R_c * t_cb + key_frame.w_t_c;
+
+  // Relative pose of current body frame in key-body coordinates.
+  Matrix3d k_R_b = w_R_bk.transpose() * w_R_b;
+  Vector3d k_t_b = w_R_bk.transpose() * (w_t_b - w_t_bk);
+
+  latest_rel_Q = Quaterniond(k_R_b);
+  latest_rel_Q.normalize();
+  latest_rel_P = k_t_b;
 }
 
 void Estimator::triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
