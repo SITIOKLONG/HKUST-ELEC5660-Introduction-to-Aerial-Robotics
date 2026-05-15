@@ -81,6 +81,25 @@ void calculateReprojectionError(const vector<cv::Point3f> &pts_3, const vector<c
     puts("calculateReprojectionError ends");
 }
 
+// Convert solvePnP output (tag-to-camera, R_ct/t_ct) to body-in-world.
+// The marker map coordinates are in the tag-board frame. Project 2/3 define
+// world from tag as R_wt and the downward camera extrinsic as T_bcd.
+static inline void cwToWb(const Eigen::Matrix3d& R_cw, const Eigen::Vector3d& t_cw,
+                          Eigen::Matrix3d& R_wb, Eigen::Vector3d& t_wb) {
+    static const Eigen::Matrix3d R_wt = (Eigen::Matrix3d() << 0, 1, 0,
+                                                              1, 0, 0,
+                                                              0, 0,-1).finished();
+    static const Eigen::Matrix3d R_bc = (Eigen::Matrix3d() << 1, 0, 0,
+                                                              0,-1, 0,
+                                                              0, 0,-1).finished();
+
+    Eigen::Matrix3d R_tb = R_cw.transpose() * R_bc;
+    Eigen::Vector3d t_tc = -R_cw.transpose() * t_cw;
+
+    R_wb = R_wt * R_tb;
+    t_wb = R_wt * t_tc;
+}
+
 // the main function you need to work with
 // pts_id: id of each point
 // pts_3: 3D position (x, y, z) in world frame
@@ -97,16 +116,17 @@ void process(const vector<int> &pts_id, const vector<cv::Point3f> &pts_3, const 
         {
             R_ref(i,j) = r.at<double>(i, j);
         }
-    std::cout << "R_ref = " << R_ref << std::endl;
-    std::cout << "t = " << t << std::endl;
-    Quaterniond Q_ref;
-    Q_ref = R_ref;
+    Vector3d t_ref(t.at<double>(0,0), t.at<double>(1,0), t.at<double>(2,0));
+    Matrix3d R_wb_ref;
+    Vector3d t_wb_ref;
+    cwToWb(R_ref, t_ref, R_wb_ref, t_wb_ref);
+    Quaterniond Q_ref(R_wb_ref);
     nav_msgs::Odometry odom_ref;
     odom_ref.header.stamp = frame_time;
     odom_ref.header.frame_id = "world";
-    odom_ref.pose.pose.position.x = t.at<double>(0, 0);
-    odom_ref.pose.pose.position.y = t.at<double>(1, 0);
-    odom_ref.pose.pose.position.z = t.at<double>(2, 0);
+    odom_ref.pose.pose.position.x = t_wb_ref(0);
+    odom_ref.pose.pose.position.y = t_wb_ref(1);
+    odom_ref.pose.pose.position.z = t_wb_ref(2);
     odom_ref.pose.pose.orientation.w = Q_ref.w();
     odom_ref.pose.pose.orientation.x = Q_ref.x();
     odom_ref.pose.pose.orientation.y = Q_ref.y();
@@ -134,16 +154,19 @@ void process(const vector<int> &pts_id, const vector<cv::Point3f> &pts_3, const 
     {
         T_mat.at<double>(i, 0) = T(i);
     }
+    // RMSE is reported in the camera frame, so use the un-inverted (R, T).
     calculateRMSE(pts_3, pts_2, R_mat, T_mat);
 
-    Quaterniond Q_yourwork;
-    Q_yourwork = R;
+    Matrix3d R_wb;
+    Vector3d t_wb;
+    cwToWb(R, T, R_wb, t_wb);
+    Quaterniond Q_yourwork(R_wb);
     nav_msgs::Odometry odom_yourwork;
     odom_yourwork.header.stamp = frame_time;
     odom_yourwork.header.frame_id = "world";
-    odom_yourwork.pose.pose.position.x = T(0);
-    odom_yourwork.pose.pose.position.y = T(1);
-    odom_yourwork.pose.pose.position.z = T(2);
+    odom_yourwork.pose.pose.position.x = t_wb(0);
+    odom_yourwork.pose.pose.position.y = t_wb(1);
+    odom_yourwork.pose.pose.position.z = t_wb(2);
     odom_yourwork.pose.pose.orientation.w = Q_yourwork.w();
     odom_yourwork.pose.pose.orientation.x = Q_yourwork.x();
     odom_yourwork.pose.pose.orientation.y = Q_yourwork.y();
@@ -156,7 +179,8 @@ cv::Point3f getPositionFromIndex(int idx, int nth)
     int idx_x = idx % 6, idx_y = idx / 6;
     double p_x = idx_x * MarkerWithMargin - (3 + 2.5 * 0.2) * MarkerSize;
     double p_y = idx_y * MarkerWithMargin - (12 + 11.5 * 0.2) * MarkerSize;
-    return cv::Point3f(p_x + (nth == 1 || nth == 2) * MarkerSize, p_y + (nth == 2 || nth == 3) * MarkerSize, 0.0);
+    return cv::Point3f(p_x + (nth == 1 || nth == 2) * MarkerSize,
+                       p_y + (nth == 2 || nth == 3) * MarkerSize, 0.0);
 }
 
 void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
@@ -196,8 +220,13 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
     if (pts_id.size() > 5)
         process(pts_id, pts_3, pts_2, img_msg->header.stamp);
 
-    cv::imshow("in", bridge_ptr->image);
-    cv::waitKey(10);
+    // Only render the debug window if a display is available — otherwise the
+    // OpenCV / Qt calls crash the whole node when running headless (e.g. over
+    // SSH without X forwarding).
+    if (std::getenv("DISPLAY") != nullptr) {
+        cv::imshow("in", bridge_ptr->image);
+        cv::waitKey(10);
+    }
 }
 
 int main(int argc, char **argv)
@@ -225,8 +254,10 @@ int main(int argc, char **argv)
     param_reader["camera_matrix"] >> K;
     param_reader["distortion_coefficients"] >> D;
 
-    //init window for visualization
-    cv::namedWindow("in", 1);
+    //init window for visualization (only if a display is available)
+    if (std::getenv("DISPLAY") != nullptr) {
+        cv::namedWindow("in", 1);
+    }
 
     ros::spin();
 }

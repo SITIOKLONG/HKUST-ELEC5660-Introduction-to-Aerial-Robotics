@@ -1,0 +1,380 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── packages ──
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{tabularx}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{float}
+
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+
+\title{\vspace{-2em}%
+  \textbf{Project 3 Phase 2: Augmented-State EKF Fusion} \\[0.3em]
+  \large Report}
+\author{Your Name}
+\date{May 8, 2026}
+
+\begin{document}
+\maketitle
+
+% ===================================================================
+\section{Introduction}
+\label{sec:intro}
+% ===================================================================
+
+This report describes the implementation of an \textbf{Augmented-State Extended Kalman Filter (EKF)} that fuses three sensing modalities:
+\begin{itemize}
+  \item \textbf{IMU} (gyroscope + accelerometer) --- high-rate process model,
+  \item \textbf{Absolute pose from PnP} --- low-rate absolute position/orientation corrections,
+  \item \textbf{Relative pose from stereo visual odometry (VO)} --- low-rate relative motion between keyframes.
+\end{itemize}
+
+The filter maintains a \textbf{21-dimensional} state vector:
+\[
+\mathbf{x} = \begin{bmatrix}
+\mathbf{p}^\top & \mathbf{q}^\top & \mathbf{v}^\top &
+\mathbf{b}_g^\top & \mathbf{b}_a^\top &
+\mathbf{p}_K^\top & \mathbf{q}_K^\top
+\end{bmatrix}^\top \in \mathbb{R}^{21},
+\]
+where \((\mathbf{p}_K, \mathbf{q}_K)\) is a \textbf{copy of the VO keyframe pose} that enables
+fusing relative-pose measurements without double-counting information.
+
+% ===================================================================
+\section{Implementation Overview}
+\label{sec:impl}
+% ===================================================================
+
+\subsection{Process Model (IMU Prediction)}
+
+The continuous-time IMU kinematics follow the standard formulation using Z--X--Y Euler angles:
+
+\begin{align*}
+\dot{\mathbf{p}} &= \mathbf{v}, \\
+\dot{\mathbf{q}} &= \mathbf{J}_r^{-1}(\mathbf{q})\,(\boldsymbol{\omega}_m - \mathbf{b}_g - \mathbf{n}_g), \\
+\dot{\mathbf{v}} &= \mathbf{g} + R(\mathbf{q})\,(\mathbf{a}_m - \mathbf{b}_a - \mathbf{n}_a), \\
+\dot{\mathbf{b}}_g &= \mathbf{n}_{bg}, \qquad
+\dot{\mathbf{b}}_a = \mathbf{n}_{ba},
+\end{align*}
+
+with the right Jacobian \(\mathbf{J}_r(\mathbf{q})\) and its inverse:
+
+\[
+\mathbf{J}_r(\mathbf{q}) =
+\begin{bmatrix}
+\cos\theta & 0 & -\sin\theta\cos\phi \\
+0 & 1 & \sin\phi \\
+\sin\theta & 0 & \cos\theta\cos\phi
+\end{bmatrix},\qquad
+\mathbf{J}_r^{-1}(\mathbf{q}) =
+\frac{1}{\cos\phi}
+\begin{bmatrix}
+\cos\theta\cos\phi & 0 & \sin\theta\cos\phi \\
+\sin\theta\sin\phi & \cos\phi & -\cos\theta\sin\phi \\
+-\sin\theta & 0 & \cos\theta
+\end{bmatrix}.
+\]
+
+Discretization uses a first-order Euler approximation:
+\[
+\mathbf{x}_{k+1} = \mathbf{x}_k + \Delta t \cdot \dot{\mathbf{x}}(\mathbf{x}_k, \mathbf{u}_k, \mathbf{0}),
+\qquad
+P_{k+1} = F_k P_k F_k^\top + V_k Q_t V_k^\top,
+\]
+where \(F_k = I + \Delta t \cdot \frac{\partial \dot{\mathbf{x}}}{\partial \mathbf{x}}\) and
+\(V_k = \Delta t \cdot \frac{\partial \dot{\mathbf{x}}}{\partial \mathbf{n}}\).
+
+\subsection{Absolute Pose Measurement (PnP)}
+\label{sec:pnp}
+
+The PnP measurement directly observes the current robot pose:
+\[
+\mathbf{z}_1 = \begin{bmatrix} \mathbf{p} \\ \mathbf{q} \end{bmatrix} + \mathbf{v}_1,
+\qquad
+C_1 = \frac{\partial \mathbf{z}_1}{\partial \mathbf{x}} = \begin{bmatrix} I_3 & 0 & 0 & 0 & 0 \\ 0 & I_3 & 0 & 0 & 0 \end{bmatrix}_{6\times15}.
+\]
+
+The update is standard:
+\[
+K = P C_1^\top (C_1 P C_1^\top + R_1)^{-1},
+\qquad
+\mathbf{x}^+ = \mathbf{x} + K (\mathbf{z}_1 - \hat{\mathbf{z}}_1),
+\qquad
+P^+ = (I - K C_1) P.
+\]
+
+\subsection{Relative Pose Measurement (Stereo VO)}
+\label{sec:vo}
+
+The VO measurement gives the \textbf{relative pose between the current body frame and the keyframe body frame}:
+
+\[
+\mathbf{z}_2 = \begin{bmatrix}
+R(\mathbf{q}_K)^\top (\mathbf{p} - \mathbf{p}_K) \\
+\operatorname{euler}\!\big(R(\mathbf{q}_K)^\top R(\mathbf{q})\big)
+\end{bmatrix} + \mathbf{v}_2.
+\]
+
+The Jacobian \(C_2 = \partial \mathbf{z}_2 / \partial \mathbf{x}\) is derived using right perturbation of Z--X--Y Euler angles (see Appendix~\ref{sec:jacobi}). The update is performed on the full 21-dimensional state.
+
+\subsection{Keyframe Handling}
+\label{sec:keyframe}
+
+When stereo VO selects a new keyframe, the augmented copy \((\mathbf{p}_K, \mathbf{q}_K)\) must be updated:
+
+\begin{enumerate}
+  \item Locate the historical state whose timestamp matches the new keyframe's timestamp.
+  \item Copy that state's pose \((\mathbf{p}, \mathbf{q})\) into the augmented portion of the current state.
+  \item Copy the corresponding covariance block and reset cross-covariance terms (conservative approximation).
+\end{enumerate}
+
+The \textbf{augmentation matrix} \(M_a \in \mathbb{R}^{21 \times 15}\) and \textbf{reduction matrix} \(M_r \in \mathbb{R}^{15 \times 21}\) are defined as:
+
+\[
+M_a = \begin{bmatrix} I_{15} \\ B \end{bmatrix},\qquad
+B = \begin{bmatrix} I_3 & 0_{3\times3} & 0_{3\times9} \\
+                    0_{3\times3} & I_3 & 0_{3\times9} \end{bmatrix},\qquad
+M_r = \begin{bmatrix} I_{15} & 0_{15\times6} \end{bmatrix}.
+\]
+
+\subsection{Out-of-Order Measurement Handling}
+\label{sec:ooo}
+
+Measurements may arrive out of chronological order. The filter maintains a \textbf{time-ordered deque} of states:
+
+\begin{enumerate}
+  \item \texttt{insertNewState}: Binary-search insertion by timestamp into the history queue.
+  \item \texttt{repropagate}: Starting from the insertion point, re-run all predictions and updates forward.
+  \item \texttt{removeOldState}: Trim old states beyond a maximum queue size (200).
+\end{enumerate}
+
+This guarantees causal consistency regardless of arrival order.
+
+% ===================================================================
+\section{Results and Visualization}
+\label{sec:results}
+% ===================================================================
+
+The filter was tested with the provided \texttt{imu\_pnp\_vo.bag} dataset.
+Figure~\ref{fig:rviz} shows the fused trajectory in RViz, and Figure~\ref{fig:path}
+compares the EKF output against the raw PnP and VO odometry topics.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/rviz_trajectory.png}
+  \caption{RViz visualization of the fused EKF odometry (red path) together with PnP and VO reference topics. The fused trajectory remains smooth and drift-free during VO-only segments.}
+  \label{fig:rviz}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/trajectory_comparison.png}
+  \caption{Top-down view comparing the EKF fused path (blue) with raw PnP absolute poses (green dots) and VO relative odometry (orange). The EKF effectively smooths PnP noise while correcting VO drift when absolute measurements are available.}
+  \label{fig:path}
+\end{figure}
+
+\subsection{Position and Orientation}
+\label{sec:state_plots}
+
+Figure~\ref{fig:pos} shows the estimated position over time.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/position_over_time.png}
+  \caption{Position estimates \((x,y,z)\) over time. The filter maintains continuous estimates during temporary loss of PnP measurements.}
+  \label{fig:pos}
+\end{figure}
+
+Figure~\ref{fig:euler} shows the estimated Euler angles.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/euler_over_time.png}
+  \caption{Euler angle estimates over time. Roll and pitch are well-observable from the accelerometer; yaw drifts during PnP outages and is corrected upon reacquisition.}
+  \label{fig:euler}
+\end{figure}
+
+\subsection{IMU Bias Estimates}
+\label{sec:bias}
+
+The estimated gyroscope and accelerometer biases converge quickly and remain stable (Figure~\ref{fig:bias}).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/bias_estimates.png}
+  \caption{Estimated gyroscope biases (top) and accelerometer biases (bottom). The biases converge within the first few seconds and stay well within expected ranges.}
+  \label{fig:bias}
+\end{figure}
+
+% ===================================================================
+\section{Discussion}
+\label{sec:discussion}
+% ===================================================================
+
+\subsection{Keyframe Handling}
+\label{sec:disc_keyframe}
+
+The keyframe copying mechanism is critical for the augmented-state formulation. When the VO module selects a new reference frame, the augmented state must be updated to reflect the new relative baseline. Our implementation:
+
+\begin{itemize}
+  \item Searches the history queue for the state matching the new keyframe timestamp.
+  \item Copies the pose \((\mathbf{p}, \mathbf{q})\) into the augmented portion \((\mathbf{p}_K, \mathbf{q}_K)\).
+  \item Updates the corresponding covariance block conservatively (zero cross-correlation).
+\end{itemize}
+
+A more sophisticated approach would propagate the cross-covariance through the linearized dynamics, but the simple reset works adequately for moderate-rate VO keyframe changes.
+
+\subsection{Out-of-Order Measurements}
+\label{sec:disc_ooo}
+
+The re-propagation strategy successfully handles out-of-order arrivals. However, the computational cost grows linearly with queue size. For real-time operation, we limit the history to 200 states, which provides sufficient buffer for the observed delay patterns.
+
+\subsection{Filter Tuning}
+\label{sec:tuning}
+
+The noise parameters were tuned empirically:
+
+\begin{table}[H]
+  \centering
+  \caption{Noise parameters used in the filter.}
+  \label{tab:noise}
+  \begin{tabular}{lcc}
+    \toprule
+    Parameter & Symbol & Value \\
+    \midrule
+    Gyroscope noise & \(\sigma_{ng}\) & 0.01 \\
+    Accelerometer noise & \(\sigma_{na}\) & 0.1 \\
+    Gyroscope bias random walk & \(\sigma_{nbg}\) & 0.0002 \\
+    Accelerometer bias random walk & \(\sigma_{nba}\) & 0.002 \\
+    PnP position noise & \(\sigma_{\text{pnp},p}\) & 0.0001 \\
+    PnP orientation noise & \(\sigma_{\text{pnp},q}\) & 0.001 \\
+    VO position noise & \(\sigma_{\text{vo},p}\) & 0.0002 \\
+    VO orientation noise & \(\sigma_{\text{vo},q}\) & 0.001 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Limitations}
+\label{sec:limits}
+
+\begin{itemize}
+  \item \textbf{Pitch angle singularity}: The Z--X--Y Euler angle parameterization has a singularity at \(\phi = \pm \frac{\pi}{2}\), where \(\mathbf{J}_r^{-1}\) becomes ill-conditioned. For the dataset tested, pitch stays well within bounds, but a quaternion-based formulation would be more robust for general motion.
+  \item \textbf{Keyframe cross-covariance}: Resetting cross-covariance terms to zero when changing keyframes is suboptimal. A proper propagation of the cross-correlation through the dynamics would yield more accurate uncertainty estimates.
+  \item \textbf{VO drift during long PnP outages}: When PnP measurements are unavailable for extended periods, the filter relies entirely on VO relative pose and IMU prediction, leading to slow drift in position.
+\end{itemize}
+
+% ===================================================================
+\section{Conclusions}
+\label{sec:conclusions}
+% ===================================================================
+
+We successfully implemented a 21-state augmented EKF that fuses IMU, PnP absolute pose, and stereo VO relative pose measurements. The key contributions are:
+
+\begin{enumerate}
+  \item Correct Z--X--Y Euler angle kinematics with right Jacobian formulation.
+  \item Consistent relative-pose measurement model using the augmented keyframe state.
+  \item History-queue-based out-of-order measurement handling with re-propagation.
+  \item Keyframe change mechanism that updates the augmented state covariance.
+\end{enumerate}
+
+The filter produces smooth, drift-corrected odometry that outperforms either sensor modality individually.
+
+% ===================================================================
+\appendix
+\section{Jacobian Derivation for the Relative Pose Model}
+\label{sec:jacobi}
+% ===================================================================
+
+This appendix documents the correct derivation of \(\texttt{jacobiG2x}\), the \(6\times21\) Jacobian of the relative-pose measurement model.
+
+\subsection{State and Notation}
+
+The \(21\)-state vector uses the Z--X--Y Euler angle convention:
+\[
+\mathbf{x} = \begin{bmatrix}
+\mathbf{p} & \mathbf{q} & \mathbf{v} & \mathbf{b}_g & \mathbf{b}_a & \mathbf{p}_K & \mathbf{q}_K
+\end{bmatrix}^\top,
+\qquad
+\mathbf{q} = (\phi,\theta,\psi).
+\]
+
+Rotation matrix (body $\to$ world): \(R(\mathbf{q}) = R_z(\psi)\,R_x(\phi)\,R_y(\theta)\).
+
+The relative-pose measurement is:
+\[
+\mathbf{z}(\mathbf{x}) = \begin{pmatrix}
+\Delta\mathbf{p} \\ \Delta\mathbf{q}
+\end{pmatrix}
+= \begin{pmatrix}
+R(\mathbf{q}_K)^\top(\mathbf{p} - \mathbf{p}_K) \\
+\operatorname{euler}\!\big(R(\mathbf{q}_K)^\top R(\mathbf{q})\big)
+\end{pmatrix}.
+\]
+
+\subsection{Right Perturbation for Z--X--Y Euler Angles}
+
+The right Jacobian \(\mathbf{J}_r(\mathbf{q})\) maps Euler-angle rates to body angular velocity:
+\[
+\boldsymbol{\omega} = \mathbf{J}_r(\mathbf{q})\,\dot{\mathbf{q}},\quad
+\mathbf{J}_r(\mathbf{q}) = 
+\begin{bmatrix}
+\cos\theta & 0 & -\sin\theta\cos\phi \\
+0 & 1 & \sin\phi \\
+\sin\theta & 0 & \cos\theta\cos\phi
+\end{bmatrix}.
+\]
+
+A small perturbation \(\delta\mathbf{q}\) corresponds to a body-frame angular perturbation:
+\[
+R(\mathbf{q}+\delta\mathbf{q}) \approx R(\mathbf{q})\,\exp\!\big([\mathbf{J}_r(\mathbf{q})\,\delta\mathbf{q}]_\times\big).
+\]
+
+\subsection{Translation Jacobian}
+
+For \(\Delta\mathbf{p} = R_K^\top(\mathbf{p} - \mathbf{p}_K)\):
+\[
+\frac{\partial\Delta\mathbf{p}}{\partial\mathbf{p}} = R_K^\top,\qquad
+\frac{\partial\Delta\mathbf{p}}{\partial\mathbf{p}_K} = -R_K^\top,\qquad
+\frac{\partial\Delta\mathbf{p}}{\partial\mathbf{q}} = \mathbf{0}.
+\]
+
+For \(\mathbf{q}_K\):
+\[
+\frac{\partial\Delta\mathbf{p}}{\partial\mathbf{q}_K} = \mathrm{skew}(R_K^\top\mathbf{d})\;\mathbf{J}_{rK},
+\]
+where \(\mathbf{d} = \mathbf{p} - \mathbf{p}_K\) and \(\mathbf{J}_{rK} = \mathbf{J}_r(\mathbf{q}_K)\).
+
+\subsection{Rotation Jacobian}
+
+For \(\Delta R = R_K^\top R\) with \(\Delta\mathbf{q} = \operatorname{euler}(\Delta R)\):
+\[
+\frac{\partial\Delta\mathbf{q}}{\partial\mathbf{q}} = \mathbf{J}_r^{-1}(\Delta\mathbf{q})\;\mathbf{J}_r(\mathbf{q}),\qquad
+\frac{\partial\Delta\mathbf{q}}{\partial\mathbf{q}_K} = -\mathbf{J}_r^{-1}(\Delta\mathbf{q})\;\Delta R^\top\;\mathbf{J}_{rK}.
+\]
+
+\subsection{Complete Jacobian}
+
+\[
+C_2 = \begin{bmatrix}
+R_K^\top & \mathbf{0} & -R_K^\top & \mathrm{skew}(R_K^\top\mathbf{d})\,\mathbf{J}_{rK} \\[4pt]
+\mathbf{0} & \mathbf{J}_r^{-1}(\Delta\mathbf{q})\;\mathbf{J}_r(\mathbf{q}) & \mathbf{0} & -\mathbf{J}_r^{-1}(\Delta\mathbf{q})\;\Delta R^\top\;\mathbf{J}_{rK}
+\end{bmatrix}_{6\times21}.
+\]
+
+Columns corresponding to \(\mathbf{v}, \mathbf{b}_g, \mathbf{b}_a\) (indices 6--14) are zero.
+
+% ===================================================================
+\section*{References}
+% ===================================================================
+
+\begin{enumerate}
+  \item Trawny, N., \& Roumeliotis, S. I. (2005). \textit{Indirect Kalman filter for 3D attitude estimation}. University of Minnesota, Dept. of Comp. Sci. \& Eng., Tech. Rep.
+  \item Sol\`a, J. (2017). \textit{Quaternion kinematics for the error-state Kalman filter}. arXiv:1711.02508.
+  \item Bloesch, M., Burri, M., Omari, S., Hutter, M., \& Siegwart, R. (2017). \textit{Iterated extended Kalman filter based visual-inertial odometry using direct photometric feedback}. The International Journal of Robotics Research, 36(10), 1053--1072.
+\end{enumerate}
+
+\end{document}
