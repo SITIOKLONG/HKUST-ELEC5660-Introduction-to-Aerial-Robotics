@@ -10,6 +10,7 @@
 #include <geometry_msgs/PointStamped.h>
 #include <vector>
 #include <deque>
+#include <set>
 
 #include <stereo_vo/relative_pose.h>
 
@@ -22,7 +23,8 @@ namespace ekf_imu_vision {
 struct AugState {
   int type;                       // the type of the state: imu, pnp, vo, keyframe
   ros::Time time_stamp;           // time stamp
-  ros::Time key_frame_time_stamp; // the keyframe time stamp of the state
+  ros::Time key_frame_time_stamp; // active keyframe time of the propagated state
+  ros::Time measurement_key_frame_time_stamp; // VO measurement's key_stamp
 
   Vec(21) mean;                   // estimated mean of the state
                                   //  1: x0:2 ~ x, y, z """
@@ -42,8 +44,24 @@ private:
   /* ============================== EKF base ============================== */
 
   deque<AugState> aug_state_hist_;  // the queue storing the necessary state history in chronological order
-  unsigned int latest_idx[4];       //the index of the latest state of the 4 type in the queue
+  int latest_idx[4];                // the index of the latest state of the 4 type in the queue
+  std::set<ros::Time> keyframe_times_;
   Vec6 current_imu_ut;
+  
+  Vec21 state_;                     // current estimated state
+  Mat21x21 cov_;
+  bool filter_initialized_;         // whether the filter is initialized
+  ros::Time init_time_;             // time when filter was initialized
+  ros::Time current_time_;          // current time
+  ros::Time current_keyframe_time_; // timestamp of the active VO keyframe (0 if none)
+  Vec6 current_keyframe_pose_;      // [pos; euler] of the active keyframe
+  Mat6x6 current_keyframe_cov_;     // 6x6 covariance of the active keyframe pose
+
+  // Output smoother: rate-limited copy of the EKF state, used only for publishing.
+  bool smoothed_initialized_;
+  Vec3 smoothed_pos_;
+  Vec3 smoothed_euler_;
+  ros::Time last_publish_time_;
 
   /* ---------- parameter ---------- */
   Mat12x12        Qt_;         // imu
@@ -67,6 +85,7 @@ private:
   void removeOldState();
 
   Vec3 rotation2Euler(const Mat3x3& R);
+  Vec3 quaternion2Euler(double w, double x, double y, double z);
 
   /* ---------- flag ---------- */
   bool            init_;

@@ -2,10 +2,6 @@
 
 namespace ekf_imu_vision {
 
-static double wrapAngle(double angle) {
-  return atan2(sin(angle), cos(angle));
-}
-
   // 从欧拉角 (phi, theta, psi) 得到旋转矩阵 R (Z-X-Y 顺序)
 // 右雅可比 Jr(q)，满足 ω_body = Jr(q) * dq/dt
 // 适用于 Z-X-Y 欧拉角 (R = Rz*Rx*Ry)
@@ -33,6 +29,10 @@ inline Mat3x3 eulerRightJacobianInv(const Vec3& q) {
             sp * st * inv_cp, 1, -ct * sp * inv_cp,
            -st * inv_cp, 0,  ct * inv_cp;
   return Jr_inv;
+}
+
+inline Mat3x3 eulerGinv(const Vec3& q) {
+  return eulerRightJacobianInv(q);
 }
 
 Mat3x3 eulerToR(const Vec3& q) {
@@ -236,23 +236,34 @@ Vec6 modelG2(const Vec21& x, const Vec6& v) {
   return z + v;
 }
 Mat6x21 jacobiG2x(const Vec21& x, const Vec6& v) {
+  (void)v;
+  Vec3 p  = x.segment<3>(0);
+  Vec3 q  = x.segment<3>(3);
+  Vec3 pK = x.segment<3>(15);
+  Vec3 qK = x.segment<3>(18);
+
+  Mat3x3 R   = eulerToR(q);
+  Mat3x3 RK  = eulerToR(qK);
+  Mat3x3 RKt = RK.transpose();
+  Mat3x3 R_rel = RKt * R;
+  Vec3 delta_q = rotation2Euler(R_rel);
+
+  Mat3x3 G_q      = eulerGinv(q).inverse();
+  Mat3x3 G_qK     = eulerGinv(qK).inverse();
+  Mat3x3 G_dq_inv = eulerGinv(delta_q);
+
   Mat6x21 C = Mat6x21::Zero();
-  Vec6 zero_v = Vec6::Zero();
-  const double eps = 1e-6;
-  for (int col = 0; col < 21; ++col) {
-    if ((col >= 6 && col < 15)) continue;
-    Vec21 xp = x;
-    Vec21 xm = x;
-    xp(col) += eps;
-    xm(col) -= eps;
-    Vec6 yp = modelG2(xp, zero_v);
-    Vec6 ym = modelG2(xm, zero_v);
-    Vec6 dy = yp - ym;
-    for (int i = 3; i < 6; ++i) {
-      dy(i) = wrapAngle(dy(i));
-    }
-    C.col(col) = dy / (2.0 * eps);
-  }
+
+  C.block<3,3>(0, 0) = RKt;
+  C.block<3,3>(0, 15) = -RKt;
+
+  Vec3 d = p - pK;
+  Vec3 a = RKt * d;
+  C.block<3,3>(0, 18) = -RKt * d_R_a_dq(qK, a);
+
+  C.block<3,3>(3, 3) = G_dq_inv * G_q;
+  C.block<3,3>(3, 18) = -G_dq_inv * R_rel.transpose() * G_qK;
+
   return C;
 }
 

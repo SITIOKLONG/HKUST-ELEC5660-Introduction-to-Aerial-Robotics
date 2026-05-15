@@ -4,7 +4,7 @@
     args="$(find stereo_vo)/config/realsense_2/realsense_n3_unsync.yaml">
     </node>
 
-    <node if="$(eval optenv('DISPLAY','') != '')" pkg="rviz" type="rviz" name="rviz" args="-d $(find aug_ekf)/config/aug_ekf.rviz" />
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find aug_ekf)/config/aug_ekf.rviz" />
 
     <node pkg="tag_detector" type="tag_detector" name="tag_detector" output="screen">
         <remap from="~image_raw" to="/flattener/flatImage_0"/>
